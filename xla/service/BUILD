@@ -6766,6 +6766,7 @@ xla_cc_test(
     srcs = ["propagate_original_value_test.cc"],
     deps = [
         ":call_inliner",
+        "//third_party/gloop/util/task:status_matchers",
         "//xla:literal_util",
         "//xla:shape_util",
         "//xla:xla_data_proto_cc",
@@ -6776,6 +6777,7 @@ xla_cc_test(
         "//xla/service/spmd:spmd_partitioner",
         "//xla/tsl/lib/core:status_test_util",
         "//xla/tsl/platform:statusor",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest_main",
     ],
