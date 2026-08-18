@@ -54,6 +54,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_instruction_utils.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
@@ -267,8 +268,9 @@ GetNumResourcesNeededForAnnotationWithKeepOriginalOrderAttrs(
     // Scheduling an async-start op will decrease the number of resources in
     // use.
     if (sched_state.async_tracker->IsSupportedAsyncStart(*instr)) {
-      CHECK_EQ(instr->users().size(), 1);
-      auto* async_done = *instr->users().begin();
+      const HloInstruction* async_done =
+          hlo_instruction_utils::async::FindAsyncDone(instr);
+      CHECK_NE(async_done, nullptr);
       CHECK(sched_state.async_tracker->IsSupportedAsyncDone(*async_done));
       auto num_resources_needed_per_instr =
           sched_state.async_tracker->GetNumResourcesPerInstruction(*async_done);
@@ -1560,10 +1562,14 @@ std::pair<int64_t, int64_t> ReadySetLt::GetMemoryPressureChanges(
   if (!core_->top_down_scheduling_) {
     std::optional<std::pair<int64_t, int64_t>> start_result;
     if (cand_node->IsSupportedAsyncDone()) {
+      const HloInstruction* start_instr =
+          hlo_instruction_utils::async::FindAsyncStart(&cand_node->GetInstr());
       const HloGraphNode* start =
-          !cand_node->GetPredecessors().empty()
-              ? &cand_node->GetPredecessors()[0].Target()
-              : nullptr;
+          start_instr != nullptr
+              ? &sched_state.sched_graph->GetNode(start_instr)
+              : (!cand_node->GetPredecessors().empty()
+                     ? &cand_node->GetPredecessors()[0].Target()
+                     : nullptr);
       if (start != nullptr && start->IsSupportedAsyncStart()) {
         start_result =
             sched_state.memory_pressure_tracker.MemoryPressureDifference(
@@ -1737,10 +1743,20 @@ bool ReadySetLt::AIsBetterThanB(DefaultSchedulerCore::ScheduleCandidate& a,
   }
   if (an->IsSupportedAsyncDone() && bn->IsSupportedAsyncDone() &&
       an->GetInstr().opcode() == bn->GetInstr().opcode()) {
+    const HloInstruction* start_an_instr =
+        hlo_instruction_utils::async::FindAsyncStart(&an->GetInstr());
+    if (start_an_instr == nullptr) {
+      start_an_instr = an->GetInstr().operand(0);
+    }
+    const HloInstruction* start_bn_instr =
+        hlo_instruction_utils::async::FindAsyncStart(&bn->GetInstr());
+    if (start_bn_instr == nullptr) {
+      start_bn_instr = bn->GetInstr().operand(0);
+    }
     const HloGraphNode& start_an =
-        sched_state.sched_graph->GetNode(an->GetInstr().operand(0));
+        sched_state.sched_graph->GetNode(start_an_instr);
     const HloGraphNode& start_bn =
-        sched_state.sched_graph->GetNode(bn->GetInstr().operand(0));
+        sched_state.sched_graph->GetNode(start_bn_instr);
     // Tie-breaker for comparing two async-done operations: if one's
     // corresponding async-start was marked as `ForceDelay`, we prioritize the
     // other one to preserve its overlap windows.
@@ -2874,15 +2890,20 @@ absl::StatusOr<HloGraphNode::TimeCost> DefaultSchedulerCore::ScheduleNode(
     } else if (resource.second == ResourceUsageType::kResourceOccupy) {
       // For supported async collective done ops, save their corresponding
       // start ops in the map
-      if (n->IsSupportedAsyncDone() &&
-          scheduling_context_->GetAsyncTracker()->IsSupportedAsyncStart(
-              *n->GetInstr().operand(0))) {
-        sched_state->resource_occupiers_in_flight[resource.first].insert(
-            n->GetInstr().operand(0));
-      } else {
-        sched_state->resource_occupiers_in_flight[resource.first].insert(
-            &n->GetInstr());
+      const HloInstruction* occupier = &n->GetInstr();
+      if (n->IsSupportedAsyncDone()) {
+        const HloInstruction* start =
+            hlo_instruction_utils::async::FindAsyncStart(&n->GetInstr());
+        if (start == nullptr) {
+          start = n->GetInstr().operand(0);
+        }
+        if (scheduling_context_->GetAsyncTracker()->IsSupportedAsyncStart(
+                *start)) {
+          occupier = start;
+        }
       }
+      sched_state->resource_occupiers_in_flight[resource.first].insert(
+          occupier);
     }
   }
   VLOG(10) << "Memory pressure before schedule: "
@@ -3122,7 +3143,11 @@ HloScheduleGraph::HloScheduleGraph(
       // happens. Add an edge between this instruction and the start in this
       // case.
       if (instr_node->IsSupportedAsyncDone()) {
-        const HloInstruction* async_start = instr->operand(0);
+        const HloInstruction* async_start =
+            hlo_instruction_utils::async::FindAsyncStart(instr);
+        if (async_start == nullptr) {
+          async_start = instr->operand(0);
+        }
         if (alias_analysis != nullptr) {
           for (const HloBuffer* buffer :
                alias_analysis->ComputeBuffersAt(instr, {})) {
@@ -3136,6 +3161,8 @@ HloScheduleGraph::HloScheduleGraph(
                   // identified as use.instruction. Add checks here to avoid
                   // adding dependencies for these instructions.
                   if (use.instruction == async_start ||
+                      reachability->IsReachable(async_start, use.instruction) ||
+                      reachability->IsReachable(use.instruction, async_start) ||
                       reachability->IsReachable(instr, use.instruction)) {
                     continue;
                   }
@@ -3511,10 +3538,13 @@ absl::Status DefaultSchedulerCore::InitializeScheduler(
       for (auto& [annotation, ops] : annotation_to_ops) {
         if (absl::c_all_of(ops, [](const HloInstruction* instr) {
               return instr->opcode() == HloOpcode::kAsyncStart ||
-                     instr->opcode() == HloOpcode::kAsyncDone;
+                     instr->opcode() == HloOpcode::kAsyncDone ||
+                     instr->opcode() == HloOpcode::kAsyncUpdate ||
+                     instr->IsAllowedAsyncIntermediary();
             })) {
           VLOG(2) << "Dropping annotations on the following ops because the "
-                     "group contains only async-start and async-done ops: ";
+                     "group contains only async-start, async-done and async "
+                     "intermediary ops: ";
           for (HloInstruction* instr : ops) {
             VLOG(2) << " " << instr->name();
             RemoveSchedulingAnnotation(instr);
@@ -3523,7 +3553,9 @@ absl::Status DefaultSchedulerCore::InitializeScheduler(
         }
         for (HloInstruction* instr : ops) {
           if (instr->opcode() == HloOpcode::kAsyncDone) {
-            HloInstruction* start = instr->async_chain_start();
+            HloInstruction* start =
+                hlo_instruction_utils::async::FindAsyncStart(instr);
+            CHECK_NE(start, nullptr);
             auto start_annotation = GetSchedulingAnnotation(start);
             CHECK_OK(start_annotation);
             if (!(*start_annotation).has_value()) {
@@ -3608,7 +3640,9 @@ DefaultSchedulerCore::GetNumResourcesNeededForAnnotation(
         // 2. if get_max_resources is true, then we compute the resource usage
         // assuming maximum overlapping, where the resources used by the
         // async-done ops need to be accumulated.
-        const HloInstruction* start = instr->operand(0);
+        const HloInstruction* start =
+            hlo_instruction_utils::async::FindAsyncStart(instr);
+        CHECK_NE(start, nullptr);
         if (absl::c_find(instrs, start) == instrs.end() || get_max_resources) {
           num_resources_needed[resource] += usage;
           continue;
