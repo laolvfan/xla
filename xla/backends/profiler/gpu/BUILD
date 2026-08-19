@@ -958,7 +958,9 @@ xla_test(
         "a100",
         "h100",
         "b200",
+        "gb200",
     ],
+    shard_count = 3,
     tags = [
         "cuda-only",
         "no_mac",
