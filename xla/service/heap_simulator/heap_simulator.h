@@ -214,6 +214,7 @@ class HeapSimulator {
       const HloAliasAnalysis& alias_analysis, const AliasInfo* alias_info,
       HloLiveRange* live_range);
 
+  bool IsHeapPressureImpacting(const HloValue* buffer) const;
   bool IgnoreBuffer(const HloValue* buffer) const;
   void Alloc(const HloValue* buffer, const HloInstruction* instruction);
   void Free(const HloValue* buffer, const HloInstruction* instruction);

@@ -22,6 +22,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -96,6 +97,45 @@ class HloBuffer {
 
   // Return all values contained in this buffer.
   const std::vector<const HloValue*>& values() const { return values_; }
+
+  // Computes the physical size of the buffer as the maximum size of its
+  // constituent HloValues according to the given size function.
+  int64_t ComputeSize(const BufferValue::SizeFunction& size_fn) const {
+    int64_t max_size = 0;
+    for (const HloValue* value : values_) {
+      max_size = std::max(max_size, size_fn(*value));
+    }
+    return max_size;
+  }
+
+  // Returns whether this value impacts dynamic heap allocation pressure (e.g.
+  // not an embedded constant or a buffer excluded by allocation filter).
+  static bool IsHeapPressureImpacting(
+      const HloValue& value, bool alloc_constants = false,
+      const absl::flat_hash_set<const HloValue*>* buffers_to_assign = nullptr) {
+    if (!alloc_constants &&
+        value.instruction()->opcode() == HloOpcode::kConstant) {
+      return false;
+    }
+    if (buffers_to_assign != nullptr && !buffers_to_assign->contains(&value)) {
+      return false;
+    }
+    return true;
+  }
+
+  // Returns true if all constituent values of this buffer impact dynamic heap
+  // pressure (e.g. no embedded constants).
+  bool IsHeapPressureImpacting(bool alloc_constants = false,
+                               const absl::flat_hash_set<const HloValue*>*
+                                   buffers_to_assign = nullptr) const {
+    for (const HloValue* value : values_) {
+      if (!IsHeapPressureImpacting(*value, alloc_constants,
+                                   buffers_to_assign)) {
+        return false;
+      }
+    }
+    return true;
+  }
 
   // Memory space color. Used to indicate the memory space that the hlo buffer
   // needs to live in.
