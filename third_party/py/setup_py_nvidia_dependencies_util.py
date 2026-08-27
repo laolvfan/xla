@@ -71,9 +71,19 @@ def get_setup_py_content_with_nvidia_wheel_versions(
       "cuda_major_version = '12'  # placeholder",
       f"cuda_major_version = '{cuda_version}'",
   )
-  for version_name, version_value in nvidia_wheel_versions[
-      str(cuda_version)
-  ].items():
+  for version_name, version_value in nvidia_wheel_versions.get("12", {}).items():
+    setup_py_content = setup_py_content.replace(
+        f"cuda12_{version_name} = ''  # placeholder",
+        f"cuda12_{version_name} = '{version_value}'",
+    )
+  for version_name, version_value in nvidia_wheel_versions.get("13", {}).items():
+    setup_py_content = setup_py_content.replace(
+        f"cuda13_{version_name} = ''  # placeholder",
+        f"cuda13_{version_name} = '{version_value}'",
+    )
+  for version_name, version_value in nvidia_wheel_versions.get(
+      str(cuda_version), {}
+  ).items():
     setup_py_content = setup_py_content.replace(
         f"{version_name} = ''  # placeholder",
         f"{version_name} = '{version_value}'",
