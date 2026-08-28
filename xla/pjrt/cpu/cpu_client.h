@@ -182,6 +182,8 @@ class PjRtCpuRawClient : public PjRtRawClient {
   tsl::AsyncValueRef<PjRtExecutable> ToAsyncExecutable(
       std::shared_ptr<PjRtExecutable> executable) const override;
 
+  tsl::RCReference<PjRtExecutableLoadState> MakeLoadState() override;
+
  private:
   friend class PjRtCpuClient;
   friend class CpuExecutableLoadState;
@@ -246,11 +248,6 @@ class PjRtCpuClient final : public CommonPjRtClientImpl {
  public:
   ~PjRtCpuClient() override;
 
-  PjRtCpuRawClient* raw_client() const override {
-    return absl::down_cast<PjRtCpuRawClient*>(
-        CommonPjRtClientImpl::raw_client());
-  }
-
   bool allow_fallback_for_donation() const override { return true; }
   // This is needed because CPU currently doesn't have per-device dispatching
   // threads for Execute() so two-phase launch can run into thread starvation.
@@ -266,16 +263,7 @@ class PjRtCpuClient final : public CommonPjRtClientImpl {
   absl::StatusOr<std::unique_ptr<HloCostAnalysis>> GetHloCostAnalysis()
       const override;
 
-  absl::StatusOr<std::unique_ptr<PjRtLoadedExecutable>> Load(
-      std::shared_ptr<PjRtExecutable> executable,
-      const LoadOptions& load_options) override;
-
   bool IsOnCpu(PjRtMemorySpace* memory_space) override { return true; }
-
-  const xla::CpuTopologyDescription& topology() const {
-    return *absl::down_cast<const CpuTopologyDescription*>(
-        &CommonPjRtClientImpl::topology());
-  }
 
   bool BufferFromHostBufferSupportsZeroCopy(
       const void* data, PrimitiveType type, absl::Span<int64_t const> dims,
@@ -294,10 +282,6 @@ class PjRtCpuClient final : public CommonPjRtClientImpl {
                 std::vector<std::unique_ptr<PjRtCpuDevice>> devices,
                 std::unique_ptr<PjRtCpuRawClient> raw_client,
                 std::unique_ptr<CpuTopologyDescription> topology);
-
-  absl::StatusOr<std::unique_ptr<PjRtLoadedExecutable>> LoadInternal(
-      std::shared_ptr<PjRtCpuExecutable> cpu_executable,
-      std::shared_ptr<DeviceAssignment> device_assignment);
 };
 
 class PjRtCpuLoadedExecutable;
@@ -330,7 +314,7 @@ class CpuPjRtRawLoadedExecutable : public PjRtRawLoadedExecutable {
 
 class CpuExecutableLoadState : public PjRtExecutableLoadState {
  public:
-  explicit CpuExecutableLoadState(PjRtCpuClient* client) : client_(client) {}
+  explicit CpuExecutableLoadState() = default;
 
   ~CpuExecutableLoadState() override = default;
 
@@ -343,10 +327,7 @@ class CpuExecutableLoadState : public PjRtExecutableLoadState {
       xla::RunId run_id, DeviceAndAssignment device_and_assign,
       int attempt) override;
 
-  PjRtCpuClient* client() const { return client_; }
-
  private:
-  PjRtCpuClient* client_;
   std::atomic<bool> is_deleted_{false};
 };
 
@@ -403,6 +384,13 @@ class PjRtCpuExecutable final : public PjRtExecutable {
 
   const CompileOptions& compile_options() const { return compile_options_; }
 
+  std::optional<HloModuleProto> GetUnoptimizedHloModule() const override {
+    if (!unoptimized_hlo_module_) {
+      return std::nullopt;
+    }
+    return unoptimized_hlo_module_->ToProto();
+  }
+
   static absl::StatusOr<std::unique_ptr<PjRtCpuExecutable>> Deserialize(
       riegeli::Any<riegeli::Reader*> reader,
       const xla::CpuTopologyDescription& topology,
@@ -446,47 +434,6 @@ class PjRtCpuExecutable final : public PjRtExecutable {
   std::unique_ptr<HloModule> unoptimized_hlo_module_;
 
   const CpuTopologyDescription* topology_;
-};
-
-class PjRtCpuLoadedExecutable final : public CommonPjRtLoadedExecutable {
- public:
-  using CommonPjRtLoadedExecutable::CommonPjRtLoadedExecutable;
-
-  ~PjRtCpuLoadedExecutable() override = default;
-
-  PjRtCpuExecutable* GetExecutable() const override {
-    return absl::down_cast<PjRtCpuExecutable*>(
-        CommonPjRtLoadedExecutable::GetExecutable());
-  }
-
-  PjRtCpuClient* client() const override {
-    return absl::down_cast<PjRtCpuClient*>(
-        CommonPjRtLoadedExecutable::client());
-  }
-
-  using PjRtLoadedExecutable::Execute;
-  absl::StatusOr<std::vector<std::vector<std::unique_ptr<PjRtBuffer>>>> Execute(
-      absl::Span<const std::vector<PjRtBuffer*>> argument_handles,
-      const ExecuteOptions& options,
-      std::optional<std::vector<Future<>>>& returned_futures) const override;
-
-  using PjRtLoadedExecutable::ExecuteSharded;
-  absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>> ExecuteSharded(
-      absl::Span<PjRtBuffer* const> argument_handles, PjRtDevice* device,
-      const ExecuteOptions& options, std::optional<Future<>>& returned_future,
-      bool fill_future) const override;
-
-  using PjRtLoadedExecutable::ExecutePortable;
-  absl::StatusOr<std::vector<std::unique_ptr<PjRtBuffer>>> ExecutePortable(
-      absl::Span<PjRtBuffer* const> argument_handles, PjRtDevice* device,
-      const ExecuteOptions& options, std::optional<Future<>>& returned_future,
-      bool fill_future) const override;
-
-  const HloInputOutputAliasConfig& input_output_alias_config() const override {
-    return GetExecutable()
-        ->cpu_executable_->module()
-        .input_output_alias_config();
-  }
 };
 
 absl::StatusOr<std::unique_ptr<PjRtClient>> ABSL_DEPRECATED(
