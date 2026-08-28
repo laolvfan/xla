@@ -382,11 +382,14 @@ TEST(StreamExecutorGpuCompilerTest, CrossCompilation) {
 
   ASSERT_OK_AND_ASSIGN(std::unique_ptr<PjRtClient> client,
                        GetStreamExecutorGpuClient(GpuClientOptions()));
-  auto se_gpu_client = dynamic_cast<StreamExecutorGpuClient*>(client.get());
-  ASSERT_NE(se_gpu_client, nullptr);
+  auto common_client = dynamic_cast<CommonPjRtClient*>(client.get());
+  ASSERT_NE(common_client, nullptr);
 
   se::StreamExecutor* stream_executor =
-      se_gpu_client->client()->backend().default_stream_executor();
+      absl::down_cast<PjRtStreamExecutorRawClient*>(common_client->raw_client())
+          ->client()
+          ->backend()
+          .default_stream_executor();
 
   auto hlo_module = std::make_shared<HloModule>("name", HloModuleConfig());
 

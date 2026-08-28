@@ -110,14 +110,18 @@ absl::StatusOr<std::unique_ptr<xla::Compiler>> GetCompilerForPlatform(
 
 absl::StatusOr<stream_executor::StreamExecutor*> GetStreamExecutor(
     PjRtClient* client) {
-  const StreamExecutorGpuClient* gpu_client =
-      dynamic_cast<const StreamExecutorGpuClient*>(client);
+  const auto* gpu_client = dynamic_cast<const CommonPjRtClient*>(client);
   if (gpu_client != nullptr) {
-    return gpu_client->client()->backend().default_stream_executor();
+    if (const auto* raw_gpu_client =
+            dynamic_cast<const PjRtStreamExecutorRawClient*>(
+                gpu_client->raw_client())) {
+      return raw_gpu_client->client()->backend().default_stream_executor();
+    }
   }
 
   return absl::InvalidArgumentError(
-      "Given PjRtClient is not a StreamExecutorGpuClient.");
+      "Given PjRtClient does not contain a xla::LocalClient needed for "
+      "autotuning.");
 }
 
 }  // namespace
